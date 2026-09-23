@@ -209,11 +209,11 @@ def gpt2_complete(
 
                 if next_id == eos_id:
                     finished[index] = True
+                    continue
 
-                else:
-                    token_ids.append(next_id)
-                    generated_ids[index].append(next_id)
-                    finished[index] = len(token_ids) == max_seq_length
+                token_ids.append(next_id)
+                generated_ids[index].append(next_id)
+                finished[index] = len(token_ids) == max_seq_length
 
     completions = [
         tokenizer.decode(ids, skip_special_tokens=True) for ids in generated_ids
