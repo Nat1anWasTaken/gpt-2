@@ -139,6 +139,21 @@ def project_to_vocabulary(hidden: torch.Tensor, wte: nn.Embedding) -> torch.Tens
     return torch.matmul(hidden, wte.weight.T)
 
 
+def gpt2_logits(
+    token_ids: list[int],
+    weights: dict[str, torch.Tensor],
+    wte: nn.Embedding,
+    wpe: nn.Embedding,
+    final_ln: nn.LayerNorm,
+) -> torch.Tensor:
+    hidden = embed_token_ids(token_ids, wte, wpe)
+
+    for layer_index in range(12):
+        hidden = transformer_block(hidden, weights, layer_index)
+
+    return project_to_vocabulary(final_ln(hidden[-1]), wte)
+
+
 def gpt2_complete(
     input: list[str],
     max_seq_length: int = 1024,
@@ -198,12 +213,7 @@ def gpt2_complete(
                 if finished[index]:
                     continue
 
-                hidden = embed_token_ids(token_ids, wte, wpe)
-
-                for layer_index in range(12):
-                    hidden = transformer_block(hidden, weights, layer_index)
-
-                next_logits = project_to_vocabulary(final_ln(hidden[-1]), wte)
+                next_logits = gpt2_logits(token_ids, weights, wte, wpe, final_ln)
                 step_logits[index].append(next_logits)
                 next_id = int(next_logits.argmax())
 
