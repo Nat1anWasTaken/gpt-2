@@ -55,7 +55,6 @@ def load_final_layer_norm(weights: dict[str, torch.Tensor]) -> nn.LayerNorm:
 def load_embedding_layers(
     weights: dict[str, torch.Tensor],
 ) -> tuple[nn.Embedding, nn.Embedding]:
-    """Build token and position embedding layers from pretrained weights."""
     word_token_embedding = nn.Embedding(50257, 768)
     word_position_embedding = nn.Embedding(1024, 768)
 
@@ -66,26 +65,21 @@ def load_embedding_layers(
     return word_token_embedding, word_position_embedding
 
 
-def embed_text(
-    text: str,
-    tokenizer: Tokenizer,
-    wte: nn.Embedding,
-    wpe: nn.Embedding,
+def embed_token_ids(
+    ids: list[int], wte: nn.Embedding, wpe: nn.Embedding
 ) -> torch.Tensor:
-    """Tokenize text and return its pretrained GPT-2 token plus position embeddings."""
-    token_ids = torch.tensor(tokenizer.encode(text).ids, dtype=torch.long)
+    token_ids = torch.tensor(ids, dtype=torch.long, device=wte.weight.device)
 
     if token_ids.numel() > 1024:
-        raise ValueError("Text exceeds GPT-2's 1024-token context length")
+        raise ValueError("Token sequence exceeds GPT-2's 1024-token context length")
 
-    positions = torch.arange(token_ids.numel())  # Assign positions 0, 1, 2, and so on.
+    positions = torch.arange(token_ids.numel(), device=token_ids.device)
     return wte(token_ids) + wpe(positions)
 
 
 def mlp_first_projection(
     normalized: torch.Tensor, weights: dict[str, torch.Tensor], layer_index: int
 ) -> torch.Tensor:
-    """Expand each token from 768 to 3072 features."""
     return (
         torch.matmul(normalized, weights[f"h.{layer_index}.mlp.c_fc.weight"])
         + weights[f"h.{layer_index}.mlp.c_fc.bias"]
@@ -95,7 +89,6 @@ def mlp_first_projection(
 def mlp_second_projection(
     activated: torch.Tensor, weights: dict[str, torch.Tensor], layer_index: int
 ) -> torch.Tensor:
-    """Project the MLP output from 3072 back to 768 features."""
     return (
         torch.matmul(activated, weights[f"h.{layer_index}.mlp.c_proj.weight"])
         + weights[f"h.{layer_index}.mlp.c_proj.bias"]
@@ -105,7 +98,6 @@ def mlp_second_projection(
 def transformer_block(
     hidden: torch.Tensor, weights: dict[str, torch.Tensor], layer_index: int
 ) -> torch.Tensor:
-    """Apply one GPT-2 transformer block using its own pretrained weights."""
     prefix = f"h.{layer_index}"
     normalized = load_first_layer_norm(weights, layer_index)(hidden)
 
@@ -144,7 +136,6 @@ def transformer_block(
 
 
 def project_to_vocabulary(hidden: torch.Tensor, wte: nn.Embedding) -> torch.Tensor:
-    """Use the token embedding weights to produce one logit per vocabulary token."""
     return torch.matmul(hidden, wte.weight.T)
 
 
@@ -175,26 +166,77 @@ def gpt2_complete(
             - The decoded completion for each input string.
             - The model logits used during greedy generation.
     """
-    raise NotImplementedError
+    if not 1 <= max_seq_length <= 1024:
+        raise ValueError("max_seq_length must be between 1 and 1024")
+
+    tokenizer = load_tokenizer()
+    eos_id = tokenizer.token_to_id("<|endoftext|>")
+    if eos_id is None:
+        raise ValueError("Tokenizer has no <|endoftext|> token")
+
+    weights = load_weights()
+    wte, wpe = load_embedding_layers(weights)
+    final_ln = load_final_layer_norm(weights)
+
+    sequences = [
+        tokenizer.encode(prompt, add_special_tokens=False).ids for prompt in input
+    ]
+
+    for token_ids in sequences:
+        if not token_ids:
+            token_ids.append(eos_id)
+        if len(token_ids) > max_seq_length:
+            raise ValueError("Prompt exceeds max_seq_length")
+
+    generated_ids: list[list[int]] = [[] for _ in sequences]
+    step_logits: list[list[torch.Tensor]] = [[] for _ in sequences]
+    finished = [len(token_ids) == max_seq_length for token_ids in sequences]
+
+    with torch.inference_mode():
+        while not all(finished):
+            for index, token_ids in enumerate(sequences):
+                if finished[index]:
+                    continue
+
+                hidden = embed_token_ids(token_ids, wte, wpe)
+
+                for layer_index in range(12):
+                    hidden = transformer_block(hidden, weights, layer_index)
+
+                next_logits = project_to_vocabulary(final_ln(hidden[-1]), wte)
+                step_logits[index].append(next_logits)
+                next_id = int(next_logits.argmax())
+
+                if next_id == eos_id:
+                    finished[index] = True
+
+                else:
+                    token_ids.append(next_id)
+                    generated_ids[index].append(next_id)
+                    finished[index] = len(token_ids) == max_seq_length
+
+    completions = [
+        tokenizer.decode(ids, skip_special_tokens=True) for ids in generated_ids
+    ]
+
+    all_logits = [
+        torch.stack(logits) if logits else wte.weight.new_empty((0, wte.num_embeddings))
+        for logits in step_logits
+    ]
+
+    if not all_logits:
+        return completions, wte.weight.new_empty((0, 0, wte.num_embeddings))
+
+    return completions, nn.utils.rnn.pad_sequence(all_logits, batch_first=True)
 
 
 def main():
-    weights = load_weights()
-    tokenizer = load_tokenizer()
-    wte, wpe = load_embedding_layers(weights)
+    prompt = "How can"
+    completions, logits = gpt2_complete([prompt], max_seq_length=16)
+    print(f"Prompt: {prompt}")
+    print(f"Completion: {completions[0]}")
+    print(f"Logits shape: {tuple(logits.shape)}")
 
-    # Token Embedding + Positional Embedding
-    hidden = embed_text("Hello world, are you ok", tokenizer, wte, wpe)
-
-    # Transformer Blocks
-    for layer_index in range(12):
-        hidden = transformer_block(hidden, weights, layer_index)
-
-    # Final Layer & Output
-    final_ln = load_final_layer_norm(weights)
-    final_hidden = final_ln(hidden)
-    logits = project_to_vocabulary(final_hidden, wte)
-    print(logits.shape)  # [T, 50257]
 
 if __name__ == "__main__":
     main()
