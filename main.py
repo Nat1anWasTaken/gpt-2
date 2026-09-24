@@ -1,21 +1,20 @@
-from pathlib import Path
-
 import torch
+from huggingface_hub import hf_hub_download
 from safetensors.torch import load_file
 from tokenizers import Tokenizer
 from torch import nn
 
-MODEL_DIR = Path(__file__).resolve().parent
+MODEL_ID = "openai-community/gpt2"
 
 
 def load_weights() -> dict[str, torch.Tensor]:
-    weights = load_file(MODEL_DIR / "model.safetensors")
+    weights = load_file(hf_hub_download(MODEL_ID, "model.safetensors"))
 
     return weights
 
 
 def load_tokenizer() -> Tokenizer:
-    return Tokenizer.from_file(str(MODEL_DIR / "tokenizer.json"))
+    return Tokenizer.from_file(hf_hub_download(MODEL_ID, "tokenizer.json"))
 
 
 def load_first_layer_norm(
